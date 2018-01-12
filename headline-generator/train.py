@@ -12,6 +12,15 @@ import numpy as np
 from keras.preprocessing import sequence
 from keras.utils import np_utils
 import random, sys
+from keras.models import Sequential
+from keras.layers.core import Dense, Activation, Dropout, RepeatVector
+from keras.layers import TimeDistributed, Merge
+from keras.layers.core import Lambda
+from keras.layers.recurrent import LSTM
+from keras.regularizers import l2
+from keras.layers.embeddings import Embedding
+from keras.optimizers import Adam, RMSprop
+import keras.backend as K
 
 FN = 'train'
 FN0 = 'vocabulary-embedding'
@@ -70,11 +79,78 @@ idx2word[empty] = '_'
 idx2word[eos] = '~'
 
 def prt(label, x):
-    print(label+':', )
+    print(label+':')
     for w in x:
-        print(idx2word[w], )
-    print( )
+        print idx2word[w],
+    print
 
 i = 334
 prt('H', Y_train[i])
 prt('D', X_train[i])
+
+i=334
+prt('H', Y_test[i])
+prt('D', X_test[i])
+
+random.seed(seed)
+np.random.seed(seed)
+
+regularizer = l2(weight_decay) if weight_decay else None
+
+model = Sequential()
+model.add(Embedding(vocab_size, embedding_size, input_length = maxlen, W_regularizer = regularizer, dropout = p_emb, weights =[embedding], mask_zero = True, name = 'embedding_1'))
+for i in range(rnn_layers):
+    lstm = LSTM(rnn_size, recurrent_regularizer=regularizer, recurrent_dropout=0, bias_regularizer=regularizer, dropout=0, kernel_regularizer=regularizer, return_sequences = True, name = 'lstm_%d'%(i+1))
+    model.add(lstm)
+    model.add(Dropout(p_dense, name = 'dropout_%d'%(i+1)))
+"""   
+def simple_context(X, mask, n=activation_rnn_size, maxlend = maxlend, maxlenh = maxlenh):
+    desc, head = X[:, :maxlend, :], X[:, maxlend:, :]
+    head_activations, head_words = head[:,:,:n], head[:,:,n:]
+    desc_activations, desc_words = desc[:,:,:n], desc[:,:,n:]
+    activation_energies = K.batch_dot(head_activations, desc_activations, axes=(2,2))
+    activation_energies = activation_energies + -1e20*K.expand_dims(1.-K.cast(mask[:, :maxlend],'float32'),1)
+    activation_energies = K.reshape(activation_energies, (-1, maxlend))
+    activation_weights = K.softmax(activation_energies)
+    activation_weights = K.reshape(activation_weights, (-1, maxlenh, maxlend))
+    desc_avg_word = K.batch_dot(activation_weights, desc_words, axes=(2,1))
+    return K.concatenate((desc_avg_word, head_words))
+"""
+def simple_context(X, mask, n=activation_rnn_size, maxlend=maxlend, maxlenh=maxlenh):
+    desc, head = X[:,:maxlend,:], X[:,maxlend:,:]
+    head_activations, head_words = head[:,:,:n], head[:,:,n:]
+    desc_activations, desc_words = desc[:,:,:n], desc[:,:,n:]
+    
+    # RTFM http://deeplearning.net/software/theano/library/tensor/basic.html#theano.tensor.batched_tensordot
+    # activation for every head word and every desc word
+    activation_energies = K.batch_dot(head_activations, desc_activations, axes=(2,2))
+    # make sure we dont use description words that are masked out
+    activation_energies = activation_energies + -1e20*K.expand_dims(1.-K.cast(mask[:, :maxlend],'float32'),1)
+    
+    # for every head word compute weights for every desc word
+    activation_energies = K.reshape(activation_energies,(-1,maxlend))
+    activation_weights = K.softmax(activation_energies)
+    activation_weights = K.reshape(activation_weights,(-1,maxlenh,maxlend))
+
+    # for every head word compute weighted average of desc words
+    desc_avg_word = K.batch_dot(activation_weights, desc_words, axes=(2,1))
+    return K.concatenate((desc_avg_word, head_words))    
+class SimpleContext(Lambda):
+    def __init__(self, **kwargs):
+        super(SimpleContext, self).__init__(simple_context, **kwargs)
+        self.supports_masking = True
+        
+    def compute_mask(self, input, input_mask = None):
+        return input_mask[:, maxlend:]
+    
+    def get_output_shape_for(self, input_shape):
+        nb_samples = input_shape[0]
+        n = 2*(rnn_size-activation_rnn_size)
+        return (nb_samples, maxlenh, n)
+        
+if activation_rnn_size:
+    model.add(SimpleContext(name='simplecontext_1'))
+model.add(TimeDistributed(Dense(vocab_size, kernel_regularizer = regularizer, bias_regularizer= regularizer, name = 'timedistributed_1')))
+model.add(Activation('softmax', name='activation_1'))
+model.compile(loss='categorical_crossentropy', optimizer = optimizer)
+
